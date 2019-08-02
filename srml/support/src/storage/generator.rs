@@ -3,79 +3,181 @@ use crate::rstd::boxed::Box;
 use crate::rstd::marker::PhantomData;
 use codec::{Codec, Encode, Decode, EncodeAppend};
 use runtime_io::{twox_64, twox_128, blake2_128, twox_256, blake2_256};
-
-pub trait StorageHasher: 'static {
-	type Output: AsRef<[u8]>;
-	fn hash(x: &[u8]) -> Self::Output;
-}
+use super::unhashed;
+use super::child;
 
 /// Hash storage keys with `concat(twox64(key), key)`
 pub struct Twox64Concat;
-impl StorageHasher for Twox64Concat {
-	type Output = Vec<u8>;
-	fn hash(x: &[u8]) -> Vec<u8> {
-		twox_64(x)
+impl Hasher for Twox64Concat {
+	fn using_hashed<R, F: FnOnce(&[u8]) -> R>(x: &[u8], f: F) -> R {
+		let hashed = twox_64(x)
 			.into_iter()
 			.chain(x.into_iter())
 			.cloned()
-			.collect::<Vec<_>>()
+			.collect::<Vec<_>>();
+		f(&hashed)
 	}
-}
-
-#[test]
-fn test_twox_64_concat() {
-	let r = Twox64Concat::hash(b"foo");
-	assert_eq!(r.split_at(8), (&twox_128(b"foo")[..8], &b"foo"[..]))
 }
 
 /// Hash storage keys with blake2 128
 pub struct Blake2_128;
-impl StorageHasher for Blake2_128 {
-	type Output = [u8; 16];
-	fn hash(x: &[u8]) -> [u8; 16] {
-		blake2_128(x)
+impl Hasher for Blake2_128 {
+	fn using_hashed<R, F: FnOnce(&[u8]) -> R>(x: &[u8], f: F) -> R {
+		f(&blake2_128(x))
 	}
 }
 
 /// Hash storage keys with blake2 256
 pub struct Blake2_256;
-impl StorageHasher for Blake2_256 {
-	type Output = [u8; 32];
-	fn hash(x: &[u8]) -> [u8; 32] {
-		blake2_256(x)
+impl Hasher for Blake2_256 {
+	fn using_hashed<R, F: FnOnce(&[u8]) -> R>(x: &[u8], f: F) -> R {
+		f(&blake2_256(x))
 	}
 }
 
 /// Hash storage keys with twox 128
 pub struct Twox128;
-impl StorageHasher for Twox128 {
-	type Output = [u8; 16];
-	fn hash(x: &[u8]) -> [u8; 16] {
-		twox_128(x)
+impl Hasher for Twox128 {
+	fn using_hashed<R, F: FnOnce(&[u8]) -> R>(x: &[u8], f: F) -> R {
+		f(&twox_128(x))
 	}
 }
 
 /// Hash storage keys with twox 256
 pub struct Twox256;
-impl StorageHasher for Twox256 {
-	type Output = [u8; 32];
-	fn hash(x: &[u8]) -> [u8; 32] {
-		twox_256(x)
+impl Hasher for Twox256 {
+	fn using_hashed<R, F: FnOnce(&[u8]) -> R>(x: &[u8], f: F) -> R {
+		f(&twox_256(x))
 	}
 }
 
-/// Hash storage keys with twox 256
-pub struct NoHash<'a>(PhantomData<'a>);
-impl<'a> StorageHasher for NoHash<'a> {
-	type Output = &'a [u8];
-	fn hash(x: &'a [u8]) -> &'a [u8] {
-		x
+pub struct NoHash;
+impl Hasher for NoHash {
+	fn using_hashed<R, F: FnOnce(&[u8]) -> R>(x: &[u8], f: F) -> R {
+		f(x)
 	}
 }
-pub struct TopStorage;
-pub struct TopStoragePrefixed;
-pub struct ChildStorage;
-pub struct ChildStoragePrefixed;
+
+pub trait Hasher {
+	fn using_hashed<R, F: FnOnce(&[u8]) -> R>(x: &[u8], f: F) -> R;
+}
+pub trait ConstSliceU8 {
+	const CONST: &'static [u8];
+}
+pub struct NullConstSliceU8;
+impl ConstSliceU8 for NullConstSliceU8 {
+	const CONST: &'static [u8] = &[];
+}
+
+pub type TopStorage<H1, H2> = TopStoragePrefixed<H1, H2, NullConstSliceU8>;
+pub struct TopStoragePrefixed<H1: Hasher, H2: Hasher, Prefix: ConstSliceU8>(PhantomData<(H1, H2, Prefix)>);
+pub type ChildStorage<H1, H2, Keyspace> = ChildStoragePrefixed<H1, H2, Keyspace, NullConstSliceU8>;
+pub struct ChildStoragePrefixed<H1: Hasher, H2: Hasher, Keyspace: ConstSliceU8, Prefix: ConstSliceU8>(PhantomData<(H1, H2, Keyspace, Prefix)>);
+
+fn using_prefixed<R, F: FnOnce(&[u8]) -> R>(x: &[u8], prefix: &[u8], f: F) -> R {
+	if prefix.is_empty() {
+		f(x)
+	} else {
+		let mut r = Vec::with_capacity(x.len() + prefix.len());
+		r.extend(prefix);
+		r.extend(x);
+		f(&r)
+	}
+}
+
+fn using_suffixed<R, F: FnOnce(&[u8]) -> R>(x: &[u8], suffix: &[u8], f: F) -> R {
+	if suffix.is_empty() {
+		f(x)
+	} else {
+		let mut r = Vec::with_capacity(x.len() + suffix.len());
+		r.extend(x);
+		r.extend(suffix);
+		f(&r)
+	}
+}
+
+impl<H1: Hasher, H2: Hasher, Prefix: ConstSliceU8> TopStoragePrefixed<H1, H2, Prefix> {
+	fn exists(key1: &[u8], key2: &[u8]) -> bool {
+		H1::using_hashed(key1, |hashed_key1| using_prefixed(hashed_key1, Prefix::CONST, |prefixed_hashed_key1| H2::using_hashed(key2, |hashed_key2| using_suffixed(prefixed_hashed_key1, hashed_key2, |final_key| unhashed::exists(final_key)))))
+	}
+
+	fn get<T: Decode>(key1: &[u8], key2: &[u8]) -> Option<T> {
+		H1::using_hashed(key1, |hashed_key1| using_prefixed(hashed_key1, Prefix::CONST, |prefixed_hashed_key1| H2::using_hashed(key2, |hashed_key2| using_suffixed(prefixed_hashed_key1, hashed_key2, |final_key| unhashed::get(final_key)))))
+	}
+
+	fn put<T: Encode>(key1: &[u8], key2: &[u8], value: &T) {
+		H1::using_hashed(key1, |hashed_key1| using_prefixed(hashed_key1, Prefix::CONST, |prefixed_hashed_key1| H2::using_hashed(key2, |hashed_key2| using_suffixed(prefixed_hashed_key1, hashed_key2, |final_key| unhashed::put(final_key, value)))))
+	}
+
+	fn kill(key1: &[u8], key2: &[u8]) {
+		H1::using_hashed(key1, |hashed_key1| using_prefixed(hashed_key1, Prefix::CONST, |prefixed_hashed_key1| H2::using_hashed(key2, |hashed_key2| using_suffixed(prefixed_hashed_key1, hashed_key2, |final_key| unhashed::kill(final_key)))))
+	}
+
+	fn kill_key1(key1: &[u8]) {
+		H1::using_hashed(key1, |hashed_key1| using_prefixed(hashed_key1, Prefix::CONST, |prefixed_hashed_key1|  unhashed::kill_prefix(prefixed_hashed_key1)))
+	}
+
+	fn get_raw(key1: &[u8], key2: &[u8]) -> Option<Vec<u8>> {
+		H1::using_hashed(key1, |hashed_key1| using_prefixed(hashed_key1, Prefix::CONST, |prefixed_hashed_key1| H2::using_hashed(key2, |hashed_key2| using_suffixed(prefixed_hashed_key1, hashed_key2, |final_key| unhashed::get_raw(final_key)))))
+	}
+
+	fn put_raw(key1: &[u8], key2: &[u8], value: &[u8]) {
+		H1::using_hashed(key1, |hashed_key1| using_prefixed(hashed_key1, Prefix::CONST, |prefixed_hashed_key1| H2::using_hashed(key2, |hashed_key2| using_suffixed(prefixed_hashed_key1, hashed_key2, |final_key| unhashed::put_raw(final_key, value)))))
+	}
+}
+
+impl<H1: Hasher, H2: Hasher, Keyspace: ConstSliceU8, Prefix: ConstSliceU8> ChildStoragePrefixed<H1, H2, Keyspace, Prefix> {
+	fn exists(key1: &[u8], key2: &[u8]) -> bool {
+		H1::using_hashed(key1, |hashed_key1| using_prefixed(hashed_key1, Prefix::CONST, |prefixed_hashed_key1| H2::using_hashed(key2, |hashed_key2| using_suffixed(prefixed_hashed_key1, hashed_key2, |final_key| child::exists(Keyspace::CONST, final_key)))))
+	}
+
+	fn get<T: Decode>(key1: &[u8], key2: &[u8]) -> Option<T> {
+		H1::using_hashed(key1, |hashed_key1| using_prefixed(hashed_key1, Prefix::CONST, |prefixed_hashed_key1| H2::using_hashed(key2, |hashed_key2| using_suffixed(prefixed_hashed_key1, hashed_key2, |final_key| child::get(Keyspace::CONST, final_key)))))
+	}
+
+	fn put<T: Encode>(key1: &[u8], key2: &[u8], value: &T) {
+		H1::using_hashed(key1, |hashed_key1| using_prefixed(hashed_key1, Prefix::CONST, |prefixed_hashed_key1| H2::using_hashed(key2, |hashed_key2| using_suffixed(prefixed_hashed_key1, hashed_key2, |final_key| child::put(Keyspace::CONST, final_key, value)))))
+	}
+
+	fn kill(key1: &[u8], key2: &[u8]) {
+		H1::using_hashed(key1, |hashed_key1| using_prefixed(hashed_key1, Prefix::CONST, |prefixed_hashed_key1| H2::using_hashed(key2, |hashed_key2| using_suffixed(prefixed_hashed_key1, hashed_key2, |final_key| child::kill(Keyspace::CONST, final_key)))))
+	}
+
+	fn kill_key1(key1: &[u8]) {
+		H1::using_hashed(key1, |hashed_key1| using_prefixed(hashed_key1, Prefix::CONST, |prefixed_hashed_key1|  child::kill_prefix(Keyspace::CONST, prefixed_hashed_key1)))
+	}
+
+	fn get_raw(key1: &[u8], key2: &[u8]) -> Option<Vec<u8>> {
+		H1::using_hashed(key1, |hashed_key1| using_prefixed(hashed_key1, Prefix::CONST, |prefixed_hashed_key1| H2::using_hashed(key2, |hashed_key2| using_suffixed(prefixed_hashed_key1, hashed_key2, |final_key| child::get_raw(Keyspace::CONST, final_key)))))
+	}
+
+	fn put_raw(key1: &[u8], key2: &[u8], value: &[u8]) {
+		H1::using_hashed(key1, |hashed_key1| using_prefixed(hashed_key1, Prefix::CONST, |prefixed_hashed_key1| H2::using_hashed(key2, |hashed_key2| using_suffixed(prefixed_hashed_key1, hashed_key2, |final_key| child::put_raw(Keyspace::CONST, final_key, value)))))
+	}
+}
+
+pub trait StorageDoubleKey {
+	/// True if the key exists in storage.
+	fn exists(key1: &[u8], key2: &[u8]) -> bool;
+
+	/// Load the bytes of a key from storage. Can panic if the type is incorrect.
+	fn get<T: Decode>(key1: &[u8], key2: &[u8]) -> Option<T>;
+
+	/// Put a value in under a key.
+	fn put<T: Encode>(key1: &[u8], key2: &[u8], val: &T);
+
+	/// Remove the bytes of a key from storage.
+	fn kill(key1: &[u8], key2: &[u8]);
+
+	/// Remove all key2 associated with key1.
+	fn kill_key1(key1: &[u8]);
+
+	/// Get a Vec of bytes from storage.
+	fn get_raw(key1: &[u8], key2: &[u8]) -> Option<Vec<u8>>;
+
+	/// Put a raw byte slice into storage.
+	fn put_raw(key1: &[u8], key2: &[u8], value: &[u8]);
+}
 
 pub trait Storage {
 	/// True if the key exists in storage.
@@ -95,6 +197,15 @@ pub trait Storage {
 
 	/// Put a raw byte slice into storage.
 	fn put_raw(key: &[u8], value: &[u8]);
+}
+
+impl<S: StorageDoubleKey> Storage for S {
+	fn exists(key: &[u8]) -> bool { S::exists(key, &[]) }
+	fn get<T: Decode>(key: &[u8]) -> Option<T> { S::get(key, &[]) }
+	fn put<T: Encode>(key: &[u8], value: &T) { S::put(key, &[], value) }
+	fn kill(key: &[u8]) { S::kill(key, &[]) }
+	fn get_raw(key: &[u8]) -> Option<Vec<u8>> { S::get_raw(key, &[]) }
+	fn put_raw(key: &[u8], value: &[u8]) { S::put_raw(key, &[], value) }
 }
 
 pub trait StorageValue<T: Codec> {
@@ -186,6 +297,7 @@ pub trait StorageMap<K: Codec, V: Codec> {
 
 	type Storage: Storage;
 
+	// TODO TODO: maybe rename key_prefix
 	fn prefix() -> &'static [u8];
 
 	// Could we change this just asking for the default value ?
@@ -523,3 +635,101 @@ impl<K: Codec, V: Codec, G: StorageLinkedMap<K, V>> super::StorageLinkedMap<K, V
 		})
 	}
 }
+
+trait StorageDoubleMap<K1: Encode, K2: Encode, V: Codec> {
+	/// The type that get/take returns.
+	type Query;
+
+	type Storage: StorageDoubleKey;
+
+	/// Get the prefix key in storage.
+	fn key1_prefix() -> &'static [u8];
+
+	// Could we change this just asking for the default value ?
+	fn from_optional_value_to_query(v: Option<V>) -> Self::Query;
+
+	fn from_query_to_optional_value(v: Self::Query) -> Option<V>;
+
+	/// Get the storage key used to fetch a value corresponding to a specific key.
+	fn key_for<KArg1: Borrow<K1> + Encode + ?Sized>(k1: &KArg1) -> Vec<u8> {
+		unimplemented!();
+		// TODO TODO
+	}
+}
+
+// TODO TODO:
+// impl<K1: Encode, K2: Encode, V: Codec, G: StorageDoubleMap<K1, K2, V>> super::StorageDoubleMap<K1, K2, V> for G {
+// 	/// The type that get/take returns.
+// 	type Query;
+
+// 	fn prefix() -> &'static [u8];
+
+// 	fn key_for<KArg1, KArg2>(k1: &KArg1, k2: &KArg2) -> Vec<u8>
+// 	where
+// 		K1: Borrow<KArg1>,
+// 		K2: Borrow<KArg2>,
+// 		KArg1: ?Sized + Encode,
+// 		KArg2: ?Sized + Encode;
+
+// 	fn prefix_for<KArg1>(k1: &KArg1) -> Vec<u8> where KArg1: ?Sized + Encode, K1: Borrow<KArg1>;
+
+// 	fn exists<KArg1, KArg2>(k1: &KArg1, k2: &KArg2) -> bool
+// 	where
+// 		K1: Borrow<KArg1>,
+// 		K2: Borrow<KArg2>,
+// 		KArg1: ?Sized + Encode,
+// 		KArg2: ?Sized + Encode;
+
+// 	fn get<KArg1, KArg2>(k1: &KArg1, k2: &KArg2) -> Self::Query
+// 	where
+// 		K1: Borrow<KArg1>,
+// 		K2: Borrow<KArg2>,
+// 		KArg1: ?Sized + Encode,
+// 		KArg2: ?Sized + Encode;
+
+// 	fn take<KArg1, KArg2>(k1: &KArg1, k2: &KArg2) -> Self::Query
+// 	where
+// 		K1: Borrow<KArg1>,
+// 		K2: Borrow<KArg2>,
+// 		KArg1: ?Sized + Encode,
+// 		KArg2: ?Sized + Encode;
+
+// 	fn insert<KArg1, KArg2, VArg>(k1: &KArg1, k2: &KArg2, val: &VArg)
+// 	where
+// 		K1: Borrow<KArg1>,
+// 		K2: Borrow<KArg2>,
+// 		V: Borrow<VArg>,
+// 		KArg1: ?Sized + Encode,
+// 		KArg2: ?Sized + Encode,
+// 		VArg: ?Sized + Encode;
+
+// 	fn remove<KArg1, KArg2>(k1: &KArg1, k2: &KArg2)
+// 	where
+// 		K1: Borrow<KArg1>,
+// 		K2: Borrow<KArg2>,
+// 		KArg1: ?Sized + Encode,
+// 		KArg2: ?Sized + Encode;
+
+// 	fn remove_prefix<KArg1>(k1: &KArg1) where KArg1: ?Sized + Encode, K1: Borrow<KArg1>;
+
+// 	fn mutate<KArg1, KArg2, R, F>(k1: &KArg1, k2: &KArg2, f: F) -> R
+// 	where
+// 		K1: Borrow<KArg1>,
+// 		K2: Borrow<KArg2>,
+// 		KArg1: ?Sized + Encode,
+// 		KArg2: ?Sized + Encode,
+// 		F: FnOnce(&mut Self::Query) -> R;
+
+// 	fn append<KArg1, KArg2, I>(
+// 		k1: &KArg1,
+// 		k2: &KArg2,
+// 		items: &[I],
+// 	) -> Result<(), &'static str>
+// 	where
+// 		K1: Borrow<KArg1>,
+// 		K2: Borrow<KArg2>,
+// 		KArg1: ?Sized + Encode,
+// 		KArg2: ?Sized + Encode,
+// 		I: codec::Encode,
+// 		V: EncodeAppend<Item=I>;
+// }

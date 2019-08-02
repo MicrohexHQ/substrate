@@ -414,10 +414,10 @@ where
 /// Note that `storage_key` must be unique and strong (strong in the sense of being long enough to
 /// avoid collision from a resistant hash function (which unique implies)).
 pub mod child {
-	use super::{Codec, Decode, Vec};
+	use super::{Codec, Encode, Decode, Vec};
 
 	/// Return the value of the item in storage under `key`, or `None` if there is no explicit entry.
-	pub fn get<T: Codec + Sized>(storage_key: &[u8], key: &[u8]) -> Option<T> {
+	pub fn get<T: Decode + Sized>(storage_key: &[u8], key: &[u8]) -> Option<T> {
 		runtime_io::child_storage(storage_key, key).map(|v| {
 			Decode::decode(&mut &v[..]).expect("storage is not null, therefore must be a valid type")
 		})
@@ -425,29 +425,29 @@ pub mod child {
 
 	/// Return the value of the item in storage under `key`, or the type's default if there is no
 	/// explicit entry.
-	pub fn get_or_default<T: Codec + Sized + Default>(storage_key: &[u8], key: &[u8]) -> T {
+	pub fn get_or_default<T: Decode + Sized + Default>(storage_key: &[u8], key: &[u8]) -> T {
 		get(storage_key, key).unwrap_or_else(Default::default)
 	}
 
 	/// Return the value of the item in storage under `key`, or `default_value` if there is no
 	/// explicit entry.
-	pub fn get_or<T: Codec + Sized>(storage_key: &[u8], key: &[u8], default_value: T) -> T {
+	pub fn get_or<T: Decode + Sized>(storage_key: &[u8], key: &[u8], default_value: T) -> T {
 		get(storage_key, key).unwrap_or(default_value)
 	}
 
 	/// Return the value of the item in storage under `key`, or `default_value()` if there is no
 	/// explicit entry.
-	pub fn get_or_else<T: Codec + Sized, F: FnOnce() -> T>(storage_key: &[u8], key: &[u8], default_value: F) -> T {
+	pub fn get_or_else<T: Decode + Sized, F: FnOnce() -> T>(storage_key: &[u8], key: &[u8], default_value: F) -> T {
 		get(storage_key, key).unwrap_or_else(default_value)
 	}
 
 	/// Put `value` in storage under `key`.
-	pub fn put<T: Codec>(storage_key: &[u8], key: &[u8], value: &T) {
+	pub fn put<T: Encode>(storage_key: &[u8], key: &[u8], value: &T) {
 		value.using_encoded(|slice| runtime_io::set_child_storage(storage_key, key, slice));
 	}
 
 	/// Remove `key` from storage, returning its value if it had an explicit entry or `None` otherwise.
-	pub fn take<T: Codec + Sized>(storage_key: &[u8], key: &[u8]) -> Option<T> {
+	pub fn take<T: Decode + Sized>(storage_key: &[u8], key: &[u8]) -> Option<T> {
 		let r = get(storage_key, key);
 		if r.is_some() {
 			kill(storage_key, key);
@@ -486,6 +486,11 @@ pub mod child {
 	/// Ensure `key` has no explicit entry in storage.
 	pub fn kill(storage_key: &[u8], key: &[u8]) {
 		runtime_io::clear_child_storage(storage_key, key);
+	}
+
+	/// Ensure keys with the given `prefix` have no entries in storage.
+	pub fn kill_prefix(storage_key: &[u8], prefix: &[u8]) {
+		unimplemented!();
 	}
 
 	/// Get a Vec of bytes from storage.
