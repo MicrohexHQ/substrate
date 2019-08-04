@@ -322,7 +322,7 @@ impl<Hash, H, B, C, E, I, Error, SO> SlotWorker<B> for BabeWorker<C, E, I, SO> w
 					return Box::pin(future::ready(Ok(())))
 				}
 			};
-
+println!("=== Babe.OnSlot: {}", slot_number);
 			let inherent_digest = BabePreDigest {
 				vrf_proof,
 				vrf_output: inout.to_output(),
@@ -1078,7 +1078,7 @@ impl<B, E, Block, I, RA, PRA> BlockImport<Block> for BabeBlockImport<B, E, Block
 			&is_descendent_of,
 			&|epoch| epoch.start_slot <= slot_number,
 		).map_err(|e| ConsensusError::from(ConsensusError::ClientImport(e.to_string())))?;
-
+println!("=== Babe.ImportBlock.slot={} enacted_epoch={:?}", slot_number, enacted_epoch);
 		let check_roots = || -> Result<bool, ConsensusError> {
 			// this can only happen when the chain starts, since there's no
 			// epoch change at genesis. afterwards every time we expect an epoch
@@ -1164,6 +1164,7 @@ impl<B, E, Block, I, RA, PRA> BlockImport<Block> for BabeBlockImport<B, E, Block
 			old_epoch_changes = Some(epoch_changes.clone());
 
 			// track the epoch change in the fork tree
+println!("=== Babe.ImportBlock.ImportNextEpoch: {:?}", next_epoch);
 			epoch_changes.import(
 				hash,
 				number,
