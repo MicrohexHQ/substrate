@@ -1,3 +1,0 @@
-+ +fn
-format!("0x{}", HexDisplay::from(&seed.as_ref())) +} + +fn format_public_key<C: Crypto>(public_key: PublicOf<C>) -> String { +	format!("0x{}", HexDisplay::from(&public_key.as_ref())) +} + +fn create_extrinsic( +	function: Call, +	index: Index, +	signer: <Sr25519 as Crypto>::Pair, +	genesis_hash: H256, +) -> UncheckedExtrinsic { +	let extra = |i: Index, f: Balance| 
-
